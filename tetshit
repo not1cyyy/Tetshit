@@ -1,0 +1,763 @@
+#!/bin/bash
+
+# Filter off unsupported os or platform
+function filter_os {
+	case "$OSTYPE" in
+	"linux-gnu" | "darwin"* | "freebsd"* )
+		;;
+
+	* )
+		printf "$0: unsupported operating system\n"
+		exit 0
+		;;
+	esac
+}
+
+# Check if SoX is installed
+if command -v play >/dev/null 2>&1; then
+    # Play Tetris music using SoX
+    play ./tetris.mp3 >/dev/null 2>&1 &
+fi
+
+# Get current time in milliseconds since the Epoch
+function get_millisecond_time {
+	case "$OSTYPE" in
+	# Linux
+	"linux-gnu" )
+		date +%s%3N
+		;;
+
+	# OS X or FreeBSD
+	# Use python because fucking BSD's date does not work with +%N (#‵′)
+	"darwin"* | "freebsd"* )
+		python -c 'import time;print"%d"%(time.time()*1000)' 2> /dev/null
+		;;
+	esac
+}
+
+
+# Save terminal screen
+function save_screen {
+	printf "\e[?47h"
+	clear
+}
+
+# Reload terminal screen
+function restore_screen {
+	clear
+	printf "\e[?47l"
+}
+
+# Set the title of terminal
+#
+# $1: title
+function set_title {
+	printf "\e]0;$1\a"
+}
+
+# Restore previous environment and exit
+#
+# $1: message to show before exit
+# $2: exit status
+function restore_env {
+	restore_screen
+
+	# Show cursor
+	tput cvvis
+
+	# Restore old tty settings
+	stty "$old_tty_settings"
+
+	printf "$1\n"
+	exit "$2"
+}
+
+# Init game environment
+function init_env {
+	# Save old tty settings
+	old_tty_settings=`stty -g`
+
+	# Turn off echoing and set read time as small as possible
+	# Use this because Bash under version 4 does not
+	# support fractional timeout of 'read' but we do need this
+	stty -echo -icanon min 0 time 1
+
+	# Hide cursor
+	tput civis
+
+	save_screen
+	set_title "Tetris"
+
+	# Catch SIGINT and SIGQUIT, ignore SIGALRM
+	trap "restore_env 'Game interrupted.' 0" SIGINT SIGQUIT
+	trap "" SIGALRM
+}
+
+# Move cursor to (row, col)
+#
+# $1: row number ranging from 1 to `tput lines`
+# $2: column number ranging from 1 to `tput cols`
+function move_to_coordinate {
+	printf "\e[$1;$2f"
+}
+
+# Move cursor to map(row, col)
+#
+# $1: row number ranging from 0 to $(( rows - 1 ))
+# $2: column number ranging from 0 to $(( cols - 1 ))
+function move_to {
+	move_to_coordinate $(( $1 + 2 )) $(( $2 * 2 + 2 ))
+}
+
+############################# Data area ########################################
+
+# Init game data
+function init_data {
+	local i=0
+	local j=0
+
+	# Width and height
+	readonly rows=20
+	readonly cols=10
+	if (( rows < 4 || cols < 4 )); then
+		restore_env "$0: the size of the game map is too small" 1
+	fi
+	if (( `tput lines` < rows + 2 || `tput cols` < cols * 2 + 12 )); then
+		restore_env "$0: the size of this terminal is too small" 1
+	fi
+
+	# Initialize game map
+	for (( i = 0; i < rows; ++i )); do
+		for (( j = 0; j < cols; ++j )); do
+			map[ $(( cols * i + j )) ]=0
+		done
+	done
+
+	# Pattern array of all blocks
+	blocks=(
+		# S
+		0 1 0 0 0 1 1 0 0 0 1 0 0 0 0 0
+		0 1 1 0 1 1 0 0 0 0 0 0 0 0 0 0
+		0 1 0 0 0 1 1 0 0 0 1 0 0 0 0 0
+		0 1 1 0 1 1 0 0 0 0 0 0 0 0 0 0
+
+		# Z
+		0 0 1 0 0 1 1 0 0 1 0 0 0 0 0 0
+		0 1 1 0 0 0 1 1 0 0 0 0 0 0 0 0
+		0 0 1 0 0 1 1 0 0 1 0 0 0 0 0 0
+		0 1 1 0 0 0 1 1 0 0 0 0 0 0 0 0
+
+		# L
+		0 1 0 0 0 1 0 0 0 1 1 0 0 0 0 0
+		0 0 1 0 1 1 1 0 0 0 0 0 0 0 0 0
+		1 1 0 0 0 1 0 0 0 1 0 0 0 0 0 0
+		0 0 0 0 1 1 1 0 1 0 0 0 0 0 0 0
+
+		# J
+		0 0 1 0 0 0 1 0 0 1 1 0 0 0 0 0
+		0 1 1 1 0 0 0 1 0 0 0 0 0 0 0 0
+		0 0 1 1 0 0 1 0 0 0 1 0 0 0 0 0
+		0 0 0 0 0 1 0 0 0 1 1 1 0 0 0 0
+
+		# I
+		0 0 0 0 1 1 1 1 0 0 0 0 0 0 0 0
+		0 1 0 0 0 1 0 0 0 1 0 0 0 1 0 0
+		0 0 0 0 1 1 1 1 0 0 0 0 0 0 0 0
+		0 1 0 0 0 1 0 0 0 1 0 0 0 1 0 0
+
+		# O
+		0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0
+		0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0
+		0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0
+		0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0
+
+		# T
+		0 0 0 0 1 1 1 0 0 1 0 0 0 0 0 0
+		0 1 0 0 0 1 1 0 0 1 0 0 0 0 0 0
+		0 1 0 0 1 1 1 0 0 0 0 0 0 0 0 0
+		0 1 0 0 1 1 0 0 0 1 0 0 0 0 0 0
+	)
+	readonly -a blocks
+
+	# Current block and next block information
+	current=(
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+	)
+	current_num=0
+	current_color=0
+	next=(
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+	)
+	next_num=0
+	next_color=0
+
+	# Initial coordinate of block in map
+	readonly init_row=0
+	readonly init_col=$(( (cols - 4) / 2 ))
+	row="$init_row"
+	col="$init_col"
+
+	# Initial speed (ranging from 0 to 10)
+	speed=0
+
+	# Keyboard control strings
+	readonly esc=`printf "\e"`
+	readonly up=`printf "[A"`
+	readonly down=`printf "[B"`
+	readonly left=`printf "[D"`
+	readonly right=`printf "[C"`
+}
+
+############################# Printing methods #################################
+
+# Print a square using specified color
+#
+# $1: color ranging from 0 to 7
+function print_square {
+	printf "\e[0;$(( $1 + 30 ));$(( $1 + 40 ))m  \e[m"
+}
+
+# Print a square using background color
+function print_background_square {
+	print_square 0
+}
+
+# Print a string using background color
+#
+# $1: a string
+function print_background_char {
+	printf "\e[1;37;40m$1\e[m"
+}
+
+# Print a block
+#
+# $1: row number ranging from 0 to $(( rows - 1 ))
+# $2: column number ranging from 0 to $(( cols - 1 ))
+# $3: color
+# $4: pattern array
+function print_block {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			move_to $(( $1 + i )) $(( $2 + j ))
+			if (( $4[ 4 * i + j ] == 1 )); then
+				print_square "$3"
+			else
+				if (( map[ cols * ($1 + i) + $2 + j ] != 0 )); then
+					print_square $(( map[ cols * ($1 + i) + $2 + j ] ))
+				else
+					print_background_square
+				fi
+			fi
+		done
+	done
+}
+
+# Print the next block
+function print_next_block {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			move_to_coordinate $(( i + 2 )) $(( 2 * (cols + j + 2) ))
+			if (( next[ 4 * i + j ] == 1 )); then
+				print_square "$next_color"
+			else
+				print_background_square
+			fi
+		done
+	done
+}
+
+# Print the whole map
+function print_map {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < rows; ++i )); do
+		for (( j = 0; j < cols; ++j )); do
+			move_to "$i" "$j"
+			if (( map[ cols * i + j ] == 0 )); then
+				print_background_square
+			else
+				print_square $(( map[ cols * i + j ] ))
+			fi
+		done
+	done
+}
+
+# Printing method invoked after block rotates
+function print_up_move {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		if (( row + i >= rows )); then
+			continue
+		fi
+		for (( j = 0; j < 4; ++j )); do
+			if (( col + j < 0 || col + j >= cols )); then
+				continue
+			fi
+			move_to $(( row + i )) $(( col + j ))
+			if (( current[ 4 * i + j ] != 0 )); then
+				print_square "$current_color"
+			else
+				if (( map[ cols * (row + i) + col + j ] != 0 )); then
+					print_square $(( map[ cols * (row + i) + col + j ] ))
+				else
+					print_background_square
+				fi
+			fi
+		done
+	done
+}
+
+# Printing method invoked after block moves down
+#
+# $1: distance to fall
+function print_down_move {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		if (( row + i >= rows )); then
+			continue
+		fi
+		for (( j = 0; j < 4; ++j )); do
+			if (( col + j < 0 || col + j >= cols )); then
+				continue
+			fi
+			if (( map[ cols * (row + i) + col + j ] == 0 )); then
+				move_to $(( row + i )) $(( col + j ))
+				print_background_square
+			fi
+		done
+	done
+
+	(( row += $1 ))
+	for (( i = 0; i < 4; ++i )); do
+		if (( row + i >= rows )); then
+			continue
+		fi
+		for (( j = 0; j < 4; ++j )); do
+			if (( col + j < 0 || col + j >= cols )); then
+				continue
+			fi
+			move_to $(( row + i )) $(( col + j ))
+			if (( current[ 4 * i + j ] != 0 )); then
+				print_square "$current_color"
+			else
+				if (( map[ cols * (row + i) + col + j ] != 0 )); then
+					print_square $(( map[ cols * (row + i) + col + j ] ))
+				else
+					print_background_square
+				fi
+			fi
+		done
+	done
+}
+
+# Printing method invoked after block moves 1 square horizontally
+#
+# $1: 0 if move to right, 1 if move to right
+function print_horizontal_move {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		if (( row + i >= rows )); then
+			continue
+		fi
+		for (( j = 0; j < 4; ++j )); do
+			if (( col + j < 0 || col + j >= cols )); then
+				continue
+			fi
+			move_to $(( row + i )) $(( col + j ))
+			if (( current[ 4 * i + j ] != 0 )); then
+				print_square "$current_color"
+			else
+				if (( map[ cols * (row + i) + col + j ] != 0 )); then
+					print_square $(( map[ cols * (row + i) + col + j ] ))
+				else
+					print_background_square
+				fi
+			fi
+		done
+		j=$(( $1 == 0 ? col + 4 : col - 1 ))
+		if (( j < 0 || j >= cols )); then
+			continue
+		fi
+		if (( map[ cols * (row + i) + j ] == 0 )); then
+			move_to $(( row + i )) "$j"
+			print_background_square
+		fi
+	done
+}
+
+############################# Keyboard control #################################
+
+# Stuffs to do when up key is hit
+function do_on_key_up {
+	local i=0
+	local j=0
+
+	local rotated=$(( current_num % 4 < 3 ? current_num + 1 : current_num - 3 ))
+	local offset=0 # Indicates number of squares to adjust horizontally
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( blocks[ 16 * rotated + 4 * i + j ] == 1 )); then
+				if (( row + i >= rows )); then
+					return
+				fi
+
+				local tmp=0
+				if (( col + j < 0 )); then
+					tmp=$(( col + j ))
+					offset=$(( tmp < offset ? tmp : offset ))
+				elif (( col + j >= cols )); then
+					tmp=$(( col + j - cols + 1 ))
+					offset=$(( tmp > offset ? tmp : offset ))
+				fi
+			fi
+		done
+	done
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( blocks[ 16 * rotated + 4 * i + j ] == 1 )); then
+				if (( map[ cols * (row + i) + col + j - offset ] != 0 )); then
+					return
+				fi
+			fi
+		done
+	done
+
+	current_num="$rotated"
+	for (( i = 0; i < 16; ++i )); do
+		(( current[ i ] = blocks[ 16 * rotated + i ] ))
+	done
+	(( col -= offset ))
+	print_up_move
+}
+
+# Stuffs to do when down key is hit
+function do_on_key_down {
+	calculate_distance
+	print_down_move "$?"
+}
+
+# Stuffs to do when left key is hit
+function do_on_key_left {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( current[ 4 * j + i ] == 1 )); then
+				if (( col + i - 1 < 0 )); then
+					break
+				fi
+				if (( map[ cols * (row + j) + col + i - 1 ] != 0 )); then
+					break
+				fi
+			fi
+		done
+		if (( j != 4 )); then
+			break
+		fi
+	done
+	if (( i == 4 )); then
+		(( --col ))
+		print_horizontal_move 0
+	fi
+}
+
+# Stuffs to do when right key is hit
+function do_on_key_right {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( current[ 4 * j + 3 - i ] == 1 )); then
+				if (( col + 4 - i >= cols )); then
+					break
+				fi
+				if (( map[ cols * (row + j) + col + 4 - i ] != 0 )); then
+					break
+				fi
+			fi
+		done
+		if (( j != 4 )); then
+			break
+		fi
+	done
+	if (( i == 4 )); then
+		(( ++col ))
+		print_horizontal_move 1
+	fi
+}
+
+# Check if keyboard is hit and respond to specified keys
+#
+# return: 1, 2, 3, 4 or 0 each corresponding to up, down, left, right or others
+function check_keyboard_hit {
+	local key=`head -c1`
+	[[ "$key" == "$esc" ]] || return 0
+	key=`head -c2`
+	case "$key" in
+	"$up" )
+		do_on_key_up
+		return 1
+		;;
+
+	"$down" )
+		do_on_key_down
+		return 2
+		;;
+
+	"$left" )
+		do_on_key_left
+		return 3
+		;;
+
+	"$right" )
+		do_on_key_right
+		return 4
+		;;
+
+	* )
+		return 0
+		;;
+	esac
+}
+
+############################# Game logics ######################################
+
+# Calculate the distance between current block and surface
+#
+# return: $dist
+function calculate_distance {
+	local i=0
+	local j=0
+	local k=0
+
+	local dist="$rows"
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( current[ 12 - 4 * j + i ] == 1 )); then
+				break
+			fi
+		done
+		if (( j == 4 )); then
+			continue
+		fi
+		for (( k = row + 4 - j; k < rows; ++k )); do
+			if (( map[ cols * k + col + i ] != 0 )); then
+				break
+			fi
+		done
+		dist=$(( k + j - row - 4 < dist ? k + j - row - 4 : dist ))
+	done
+
+	return $dist
+}
+
+# Generate a new block with random shape and color
+#
+# $1: name of block number
+# $2: name of color number
+# $3: name of pattern array
+function generate_new_block {
+	let "$1=$(( RANDOM % 28 ))"
+	let "$2=$(( RANDOM % 7 + 1 ))"
+	for (( i = 0; i < 16; ++i )); do
+		let "$3[ $i ]=$(( blocks[ 16 * $1 + i ] ))"
+	done
+}
+
+# Write current block to map
+function write_to_map {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			(( map[ cols * (row + i) + col + j ] += current[ 4 * i + j ] * current_color ))
+		done
+	done
+}
+
+# Remove full lines
+function decrease_lines {
+	local i=0
+	local j=0
+	local k=0
+
+	for (( i = rows - 1; i >= 0; )); do
+		for (( j = 0; j < cols; ++j )); do
+			if (( map[ cols * i + j ] == 0 )); then
+				break
+			fi
+		done
+		if (( j == cols )); then
+			for (( j = i; j > 0; --j )); do
+				for (( k = 0; k < cols; ++k )); do
+					(( map[ cols * j + k ] = map[ cols * (j - 1) + k ] ))
+				done
+			done
+			for (( j = 0; j < cols; ++j )); do
+				(( map[ j ] = 0 ))
+			done
+		else
+			(( --i ))
+		fi
+	done
+}
+
+# Judge if game is over
+#
+# return: 1 if game is over, otherwise 0
+function judge_game_over {
+	local i=0
+	local j=0
+
+	for (( i = 0; i < 4; ++i )); do
+		for (( j = 0; j < 4; ++j )); do
+			if (( next[ 4 * i + j ] == 1 )); then
+				if (( map[ cols * (init_row + i) + init_col + j ] != 0 )); then
+					break
+				fi
+			fi
+		done
+		if (( j < 4 )); then
+			break
+		fi
+	done
+	if (( i < 4 )); then
+		return 1
+	else
+		return 0
+	fi
+}
+
+# Replace current block with next block
+function replace_current_with_next {
+	local i=0
+
+	current_num="$next_num"
+	current_color="$next_color"
+	for (( i = 0; i < 16; ++i )); do
+		(( current[ i ] = next[ i ] ))
+	done
+}
+
+############################# Init and main ####################################
+
+# Init the game
+function init {
+	local i=0
+	local j=0
+
+	init_env
+	init_data
+
+	move_to_coordinate 1 1
+	print_background_char "+"
+	for (( i = 0; i < cols; ++i )); do
+		print_background_char "--"
+	done
+	print_background_char "+\n"
+	for (( i = 0; i < rows; ++i )); do
+		print_background_char "|"
+		for (( j = 0; j < cols; ++j )); do
+			print_background_square
+		done
+		print_background_char "|\n"
+	done
+	print_background_char "+"
+	for (( i = 0; i < cols; ++i )); do
+		print_background_char "--"
+	done
+	print_background_char "+\n"
+
+	move_to_coordinate 1 $(( cols * 2 + 3 ))
+	print_background_char "+--------+"
+	for (( i = 0; i < 4; ++i )); do
+		move_to_coordinate $(( 2 + i )) $(( cols * 2 + 3 ))
+		print_background_char "|"
+		for (( j = 0; j < 4; ++j )); do
+			print_background_square
+		done
+		print_background_char "|"
+	done
+	move_to_coordinate 6 $(( cols * 2 + 3 ))
+	print_background_char "+--------+"
+}
+
+# Main process
+function main {
+	init
+
+	generate_new_block current_num current_color current
+	generate_new_block next_num next_color next
+	print_block "$row" "$col" "$current_color" current
+	print_next_block
+
+	while true; do
+		while true; do
+			local start=`get_millisecond_time`
+			local interval=$(( 700 - speed * 100 )) # In milliseconds
+
+			while (( `get_millisecond_time` - start < interval )); do
+				check_keyboard_hit
+
+				# If player hit down, give him 200ms to move around
+				if (( $? == 2 )); then
+					start=`get_millisecond_time`
+					while (( `get_millisecond_time` - start < 200 )); do
+						check_keyboard_hit
+					done
+					break
+				fi
+			done
+
+			calculate_distance
+			if (( $? > 0 )); then
+				print_down_move 1
+			else
+				break
+			fi
+		done
+
+		write_to_map
+		decrease_lines
+		print_map
+
+		judge_game_over
+		if (( $? )); then
+			break
+		else
+			replace_current_with_next
+			generate_new_block next_num next_color next
+			row="$init_row"
+			col="$init_col"
+			print_block "$row" "$col" "$current_color" current
+			print_next_block
+		fi
+	done
+
+	restore_env "Game over!!!" 0
+}
+
+filter_os
+main $@
