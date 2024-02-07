@@ -13,11 +13,12 @@ function filter_os {
 	esac
 }
 
-# Check if SoX is installed
-if command -v play >/dev/null 2>&1; then
-    # Play Tetris music using SoX
-    play ./tetris.mp3 >/dev/null 2>&1 &
+# Check if mpv is installed
+if command -v mpv >/dev/null 2>&1; then
+    # Play Tetris music using mpv
+    mpv --audio-display=no --loop tetris.mp3 >/dev/null 2>&1 &
 fi
+
 
 # Get current time in milliseconds since the Epoch
 function get_millisecond_time {
