@@ -17,6 +17,8 @@ function filter_os {
 if command -v mpv >/dev/null 2>&1; then
     # Play Tetris music using mpv
     mpv --audio-display=no --loop tetris.mp3 >/dev/null 2>&1 &
+	# Store the PID of the mpv process
+    mpv_pid=$!
 fi
 
 
@@ -757,7 +759,9 @@ function main {
 		fi
 	done
 
+	kill -9 $mpv_pid
 	restore_env "Game over!!!" 0
+
 }
 
 filter_os
